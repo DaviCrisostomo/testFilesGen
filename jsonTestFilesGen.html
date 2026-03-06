@@ -1,1 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
 
+<head>
+    <meta charset="UTF-8">
+    <title>Splunk Test Automation Tool</title>
+    <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 40px;
+        }
+
+        h2 {
+            margin-top: 40px;
+        }
+
+        .step {
+            border: 1px solid #ccc;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+        }
+
+        .step.disabled {
+            opacity: 0.5;
+            pointer-events: none;
+        }
+
+        button {
+            padding: 8px 15px;
+            margin-top: 10px;
+            cursor: pointer;
+        }
+
+        textarea {
+            width: 100%;
+            height: 200px;
+            margin-top: 10px;
+        }
+
+        .copy-btn {
+            float: right;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .success {
+            color: green;
+        }
+
+        .error {
+            color: red;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>Splunk Test Automation Guide</h1>
+    <p>Follow the steps in order. If you re-run a previous step, later steps will reset.</p>
+
+    <!-- STEP 1 -->
+    <div id="step1" class="step">
+        <h2>Step 1: Upload XML (Test Definitions with GUID)</h2>
+        <input type="file" id="xmlInput" accept=".xml,.xlsx,.xls">
+        <br>
+        <button onclick="processXML()">Generate Splunk Query</button>
+        <p id="step1Status"></p>
+    </div>
+
+    <!-- STEP 2 -->
+    <div id="step2" class="step disabled">
+        <h2>Step 2: Splunk Query</h2>
+        <span class="copy-btn" onclick="copyQuery()">📋 Copy</span>
+        <textarea id="splunkQuery" readonly></textarea>
+        <p>Run this query in Splunk and export the results as CSV.</p>
+    </div>
+
+    <!-- STEP 3 -->
+    <div id="step3" class="step disabled">
+        <h2>Step 3: Upload Splunk CSV Result</h2>
+        <input type="file" id="csvInput" accept=".csv">
+        <br>
+        <button onclick="processCSV()">Generate JSON Files</button>
+        <p id="step3Status"></p>
+    </div>
+
+    <!-- STEP 4 -->
+    <div id="step4" class="step disabled">
+        <h2>Step 4: Download JSON Zip</h2>
+        <button onclick="downloadZip()">Download ZIP</button>
+        <p id="step4Status"></p>
+    </div>
+
+    <script>
+
+        let testCases = [];
+        let zip = new JSZip();
+
+        function resetFromStep(stepNumber) {
+            for (let i = stepNumber; i <= 4; i++) {
+                document.getElementById("step" + i).classList.add("disabled");
+            }
+        }
+
+        function enableStep(stepNumber) {
+            document.getElementById("step" + stepNumber).classList.remove("disabled");
+        }
+
+        function processXML() {
+            try {
+                resetFromStep(2);
+                const file = document.getElementById("xmlInput").files[0];
+                if (!file) throw "Please upload a file.";
+
+                const reader = new FileReader();
+                reader.onload = function (e) {
+                    testCases = [];
+                    let guidList = [];
+                    let lastTestNumber = "";
+
+                    // --- XML ---
+                    if (file.name.endsWith(".xml")) {
+                        const parser = new DOMParser();
+                        const xmlDoc = parser.parseFromString(e.target.result, "text/xml");
+                        const rows = xmlDoc.getElementsByTagName("test");
+                        for (let row of rows) {
+                            const testNum = row.getElementsByTagName("TestNumber")[0]?.textContent || "";
+                            const letter = row.getElementsByTagName("Letter")[0]?.textContent || "";
+                            const rawGuid = row.getElementsByTagName("guid")[0]?.textContent || "";
+                            const cleanGuid = rawGuid.trim();
+                            if (!cleanGuid || cleanGuid.toLowerCase() === "n/a") continue;
+
+                            if (testNum && String(testNum).trim() !== "") lastTestNumber = String(testNum).trim();
+                            const testCaseId = String(lastTestNumber || "") + String(letter || "");
+
+                            testCases.push({ guid: cleanGuid, testCaseId });
+                            guidList.push(`"${cleanGuid}"`);
+                        }
+                    }
+                    // --- Excel ---
+                    else {
+                        const workbook = XLSX.read(e.target.result, { type: "binary" });
+                        workbook.SheetNames.forEach(sheetName => {
+                            const sheet = workbook.Sheets[sheetName];
+                            const range = XLSX.utils.decode_range(sheet['!ref']);
+                            const rows = [];
+                            for (let R = range.s.r; R <= range.e.r; ++R) {
+                                const row = [];
+                                for (let C = range.s.c; C <= range.e.c; ++C) {
+                                    const cell = sheet[XLSX.utils.encode_cell({ r: R, c: C })];
+                                    row.push(cell ? cell.v : "");
+                                }
+                                rows.push(row);
+                            }
+                            if (rows.length < 2) return;
+
+                            let headerRowIndex = rows.findIndex(r =>
+                                Array.isArray(r) && r.some(c => String(c || "").toLowerCase().includes("guid"))
+                            );
+                            if (headerRowIndex === -1) return;
+
+                            const headers = rows[headerRowIndex].map(h => String(h || "").trim().toLowerCase());
+                            const guidIndex = headers.findIndex(h => h.includes("guid"));
+                            const testIndex = headers.findIndex(h => h.includes("test"));
+                            const letterIndex = testIndex !== -1 ? testIndex + 1 : -1;
+                            if (guidIndex === -1) return;
+
+                            for (let i = headerRowIndex + 1; i < rows.length; i++) {
+                                const row = rows[i];
+                                const rawGuid = row[guidIndex];
+                                const cleanGuid = String(rawGuid || "").trim();
+                                if (!cleanGuid || cleanGuid.toLowerCase() === "n/a") continue;
+
+                                let testNum = testIndex !== -1 ? row[testIndex] : "";
+                                const letter = letterIndex !== -1 ? row[letterIndex] : "";
+
+                                if (testNum && String(testNum).trim() !== "") lastTestNumber = String(testNum).trim();
+                                const testCaseId = String(lastTestNumber || "") + String(letter || "");
+
+                                testCases.push({ guid: cleanGuid, testCaseId });
+                                guidList.push(`"${cleanGuid}"`);
+                            }
+                        });
+                    }
+
+                    if (testCases.length === 0) throw "No valid test cases found.";
+
+                    const evalCases = testCases.map(tc => `guid = "${tc.guid}", "${tc.testCaseId}"`).join(",\n    ");
+                    const splunkQuery = `
+index=tmapm host IN (*-TM*) endPoint="/api/rest/v1/*"
+| spath
+| search guid IN (${[...new Set(guidList)].join(", ")})
+| eval test_case = case(
+    ${evalCases}
+)
+| stats count by test_case, _raw
+`;
+                    document.getElementById("splunkQuery").value = splunkQuery.trim();
+                    document.getElementById("step1Status").innerHTML = "<span class='success'>Query generated successfully.</span>";
+                    enableStep(2);
+                    enableStep(3);
+                };
+
+                if (file.name.endsWith(".xml")) reader.readAsText(file);
+                else reader.readAsBinaryString(file);
+
+            } catch (err) {
+                document.getElementById("step1Status").innerHTML = "<span class='error'>" + err + "</span>";
+                resetFromStep(2);
+            }
+        }
+
+        async function copyQuery() {
+            const textarea = document.querySelector("#splunkQuery");
+            try {
+                await navigator.clipboard.writeText(textarea.value);
+                console.log("Copied to clipboard");
+            } catch (err) {
+                console.error("Failed to copy:", err);
+            }
+        }
+
+        function processCSV() {
+            try {
+                resetFromStep(4);
+
+                const file = document.getElementById("csvInput").files[0];
+                if (!file) throw "Please upload CSV file.";
+
+                const reader = new FileReader();
+
+                reader.onload = function (e) {
+                    const text = e.target.result;
+
+                    const lines = text.split(/\r?\n/);
+                    if (lines.length < 2) throw "CSV appears empty.";
+
+                    // Parse headers safely
+                    const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, ""));
+                    const testCaseIndex = headers.indexOf("test_case");
+                    const rawIndex = headers.indexOf("_raw");
+
+                    if (testCaseIndex === -1 || rawIndex === -1)
+                        throw "CSV missing required columns.";
+
+                    zip = new JSZip();
+                    let count = 0;
+
+                    // Function to split CSV row respecting quotes
+                    function parseCSVRow(row) {
+                        const cols = row.match(/("([^"]|"")*"|[^,]+)/g);
+                        if (!cols) return [];
+                        return cols.map(c => c.trim().replace(/^"|"$/g, "").replace(/""/g, '"'));
+                    }
+
+                    for (let i = 1; i < lines.length; i++) {
+                        const line = lines[i];
+                        if (!line.trim()) continue;
+
+                        const cols = parseCSVRow(line);
+                        if (cols.length <= Math.max(testCaseIndex, rawIndex)) continue;
+
+                        const testCase = cols[testCaseIndex];
+                        const raw = cols[rawIndex];
+
+                        if (!testCase || !raw) continue;
+
+                        try {
+                            const parsed = JSON.parse(raw);
+                            const safeName = testCase.replace(/[^a-z0-9-_]/gi, "");
+                            zip.file(safeName + ".json", JSON.stringify(parsed, null, 4));
+                            count++;
+                        } catch (err) {
+                            console.warn("Skipping invalid JSON for test_case:", testCase);
+                        }
+                    }
+
+                    if (count === 0) throw "No valid JSON entries found in CSV.";
+
+                    document.getElementById("step3Status").innerHTML =
+                        `<span class='success'>${count} JSON files created successfully.</span>`;
+
+                    enableStep(4);
+                };
+
+                reader.readAsText(file);
+
+            } catch (err) {
+                document.getElementById("step3Status").innerHTML =
+                    "<span class='error'>" + err + "</span>";
+                resetFromStep(4);
+            }
+        }
+
+        function downloadZip() {
+            zip.generateAsync({ type: "blob" }).then(function (content) {
+                const link = document.createElement("a");
+                link.href = URL.createObjectURL(content);
+                link.download = "json_files.zip";
+                link.click();
+                document.getElementById("step4Status").innerHTML =
+                    "<span class='success'>ZIP downloaded.</span>";
+            });
+        }
+
+    </script>
+</body>
+
+</html>
